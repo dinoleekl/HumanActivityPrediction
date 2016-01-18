@@ -1,0 +1,239 @@
+---
+title: "Machine learning on weight-lifting exercises"
+author: "Kean Loon Lee"
+date: "17 January, 2016"
+output: html_document
+---
+
+# Synopsis
+We use machine learning to predict 5 types of weight-lifting manners, based on data from accelerometers on the belt, forearm, arm and dumbbell. We split the original training set into a final training set (75%) and a cross-validation set (25%). In total, we train a random forest model, a boosting tree model and a support vector machine. The tuning parameters are optimised by checking the convergence of the learning curves. The out-of-sample accuracy is estimated using the cross-validation set. For the various models, the accuracies are 0.98 (boosted tree), 0.98 (random forest) and 0.99 (support vector machine). The three models yield identical predictions on the 20 test cases of the assignment,
+
+**BABAA EDBAA BCBAE EABBB**.
+
+Submission to **Coursera** course website verifies that our prediction is 100% correct.
+
+# Data source
+The original data came from [here](http://groupware.les.inf.puc-rio.br/har), but our analysis was carried out using the dataset available at the [course website](https://www.coursera.org/learn/practical-machine-learning/peer/R43St/prediction-assignment-writeup). The original study on the weight-lifting exercises had been published in:  
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. *Qualitative Activity Recognition of Weight Lifting Exercises*. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+```{r, echo=FALSE}
+setwd("~/Documents/Coursera/machine/machine_assignment") # set current working directory
+```
+
+```{r, label=data.source}
+train.file <- 'pml-training.csv' # download training data
+if(!file.exists(train.file)){
+  file.URL <- paste("https://d396qusza40orc.cloudfront.net/predmachlearn/",
+                    "pml-training.csv")
+  download.file(file.URL,train.file,method="curl")
+}
+test.file <- 'pml-testing.csv' # download testing data
+if(!file.exists(test.file)){
+  file.URL <- paste("https://d396qusza40orc.cloudfront.net/predmachlearn/",
+                    "pml-testing.csv")
+  download.file(file.URL,test.file,method="curl")
+}
+```
+
+# Exploratory analysis
+```{r, echo=FALSE, message=FALSE}
+# libraries for our analysis
+library(caret);library(gbm);library(kernlab); 
+```
+
+There are **19622** records in the training set and **20** records in the testing set. The two sets consist of **160** columns with identical column names except for the last one. The last column stores the response (**classe**) in the training set or **problem_id** in the testing set.
+```{r results=FALSE}
+training <- read.csv(train.file,sep=",",header=TRUE) # training set 
+testing <- read.csv(test.file,sep=",",header=TRUE) # testing set 
+```
+
+```{r echo=FALSE, eval=FALSE}
+dim(training); dim(testing) 
+sum(!(names(training)==names(testing))) # check how many column names are unequal 
+```
+
+## Data cleaning and preprocessing
+Certain variables are redundant, with exactly **19216** records of either *NA* or *empty space*. The origin of these redundancies is associated with the variable **new_window**, where *NA* or *empty space* records correspond to **new_window**=*no*. We remove these redundant variables from our analysis. This reduce the number of variables to **60**.
+```{r, label=cleaning}
+na.or.empty <- function(x) (is.na(x) | x == "") # check if redundant 
+x<-apply(training[1,], 2,na.or.empty) 
+training <- training[,!(x)] 
+testing <- testing[,!(x)] 
+```
+
+The first 7 variables (indices, time, window, etc.) do not contain information that appears to be relevant. Hence we consider only the last 53 columns of variables.
+
+To further reduce the number of variables, we use Principal Component Analysis to capture 95 percent of the variance with 25 components.
+```{r, label=pca}
+pca.model <- preProcess(training[,8:59],method="pca",thresh=0.95) 
+pca.model 
+```
+
+The final data sets used for training and prediction therefore contain **25** features.
+```{r, cache=FALSE, label=final.data}
+trainPC <- predict(pca.model,training[,8:59]) # training set after PCA
+trainPC$classe <- training[,60]
+
+testPC <- predict(pca.model,testing[,8:59]) # testing set after PCA 
+testPC$problem.id <- testing[,60]
+dim(trainPC);dim(testPC)
+```
+
+# Data splitting
+In order to assess the accuracy of our models, we need to further split our initial training data into a final training set (75 percent) and a cross-validation set (25 percent). We will use the cross-validation set to compute the out-of-sample accuracy of a boosted tree model, a random forest model and a support vector machine.
+```{r, cache=TRUE,label=data.split}
+set.seed(9714) 
+inTrain = createDataPartition(trainPC$classe, p = 0.75)[[1]]
+train.final = trainPC[inTrain,]
+cv.final = trainPC[-inTrain,]
+```
+
+# Prediction models
+## 1) Boosted trees (**gbm**)
+We train our boosted tree model using **gbm**. However, the cran-r package appears to have serious [memory leak problem](https://www.kaggle.com/c/otto-group-product-classification-challenge/forums/t/13273/problems-with-r-caret-gbm). We therefore choose to use the [developer's version](https://github.com/harrysouthworth/gbm) instead.
+```{r, eval=FALSE,cache=TRUE,message=FALSE, label=gbm.download}
+github = FALSE # set to true if you want to install the developer's version
+if(github){
+  library(devtools)
+  install_github("harrysouthworth/gbm") # install the gbm package from github
+                                        # if necessary
+}
+```
+
+In order to achieve the best performance, we vary the number of boosting iterations (up to **1000**) and the interaction depth (up to **12**). A plot of the internal cross-validation accuracy of the **gbm** model shows that our best boosting model (**900** boosting iterations and interaction depth = **12**) has already converged, with an internal cross-validation accuracy 0.9739. Applying the best model on our cross-validation set yields accuracy=0.977.
+
+```{r, eval=TRUE,cache=TRUE, message = FALSE, label=gbm.train} 
+# cross-validation accuracy of a fitted GBM model
+acc.gbm <- function(fitted,true.val){
+  p <- apply(fitted, 1, 
+             function(x, labels){ labels[x == max(x)] },labels = unique(true.val))
+  acc <- sum(p == true.val)/length(p)
+  acc
+}
+
+set.seed(693)
+library(gbm)
+# our tuning grid
+gbmGrid <- expand.grid(n.trees = (1:10)*100,
+                       interaction.depth = (1:4)*3,
+                       shrinkage = c(.1),
+                       cv.acc = 0.)
+best.acc <- 0.
+start.time <- Sys.time()
+for(i in 1:nrow(gbmGrid)) # loop through our tuning parameters
+{
+  gbm1 <- gbm(classe ~ .,data = train.final,
+              distribution = "multinomial",cv.folds = 5,
+              n.tree = gbmGrid[i,]$n.trees,bag.fraction = 0.8,
+              shrinkage = gbmGrid[i,]$shrinkage,
+              interaction.depth = gbmGrid[i,]$interaction.depth,verbose = FALSE)
+  gbmGrid[i,]$cv.acc <- acc.gbm(gbm1$cv.fitted,train.final$classe)
+  if(gbmGrid[i,]$cv.acc > best.acc)
+  {
+    best.acc <- gbmGrid[i,]$cv.acc # current best estimate of cv accuracy
+    boost.model <- gbm1 # current best model
+  }
+}
+end.time <- Sys.time()
+time.taken <- end.time - start.time
+time.taken # time taken to train the model
+
+boost <- predict(boost.model,cv.final)
+# convert boost into class labels
+boost <- apply(boost, 1, 
+               function(x, labels){ labels[x == max(x)] },
+               labels = unique(train.final$classe))
+confusionMatrix(boost,cv.final$classe)
+```
+
+### The learning curves of our **gbm** model
+```{r, eval=TRUE,label=gbm.curve}
+gbmGrid$interaction.depth <- as.factor(gbmGrid$interaction.depth)
+g <- ggplot(gbmGrid,aes(x=n.trees,y=cv.acc,color=factor(interaction.depth)))
+g + geom_line(stat="identity") + geom_point() +
+    labs(x="# of boosting iterations") +
+    labs(y="CV accuracy")
+best.acc # best internal cross-validation accuracy from gbm
+```
+
+```{r, echo=FALSE, eval=FALSE}
+boost.model$n.trees # number of boosting iteracions of our best model
+boost.model$interaction.depth # interaction depth of our best model
+```
+
+
+```{r, echo=FALSE,message=FALSE}
+# use it for subsequent models
+library(doMC) # library to use multicore for parallel
+registerDoMC(cores = 3) 
+```
+
+## 2) Random forest (**rf**)
+The random forest model gives a cross-validation accuracy = 0.9776. Learning curve from the default setting shows that no further tuning is required.
+```{r, cache=TRUE,label=rf.train}
+set.seed(5671) 
+start.time <- Sys.time()
+rf.model <- train(classe ~., method = "rf", data = train.final)
+end.time <- Sys.time()
+rf <- predict(rf.model, cv.final)
+confusionMatrix(rf,cv.final$classe)
+
+time.taken <- end.time - start.time
+time.taken # time taken to train the model
+```
+
+### Learning curve of our random forest model
+```{r, label=rf.summary}
+plot(rf.model)
+```
+
+## 3) Support vector machine (**svm**)
+For our **svm** model, we use the radial basis kernel (we have tried linear basis kernel, but it fails badly). The learning curve shows that our best model (sigma=**0.1**, C=**15**) has converged, with an internal cross-validation accuracy of 0.9889 produced by **caret**. Applying the best model to our cross-validation set yields an accuracy of 0.9918.
+
+```{r, cache=TRUE, label=svm.train,message=FALSE}
+set.seed(2384) 
+svmctrl <- trainControl(method = "cv") # this is impt to remove 
+                                       # error msg: "some row.names duplicated"
+svmGrid <- expand.grid(sigma=c(0.01,0.05,0.1,0.2,0.5),C=c(1.,3.,6.,9.,12,15))
+start.time <- Sys.time()
+svm.model <- train(classe ~., method = "svmRadial", data = train.final,
+                   trControl = svmctrl,tuneGrid = svmGrid,verbose=FALSE)
+end.time <- Sys.time()
+svm <- predict(svm.model, cv.final)
+confusionMatrix(svm,cv.final$classe)
+
+time.taken <- end.time - start.time
+time.taken # time taken to train the model
+```
+### The learning curves of our **svm** model
+```{r,label=svm.curve}
+plot(svm.model)
+svm.model$finalModel # the best SVM model
+```
+
+# Predictions on the test set of assignment
+We now apply our models (random forest, boosted trees and svm) on the test set of assignment. The three models yield identical results.
+```{r, eval=TRUE,label=test.set, message=FALSE}
+boost.assign <- predict(boost.model,testPC) # gbm prediction
+# convert boost prediction into class labels
+boost.assign <- apply(boost.assign, 1, function(x, labels){ labels[x == max(x)] },
+                                       labels = unique(trainPC$classe))
+assignDF <- data.frame(rf=predict(rf.model,testPC), # random forest prediction
+                       gbm=boost.assign,
+                       svm=predict(svm.model,testPC), # svm prediction
+                       problem.id = testPC$problem.id)
+```
+
+## Visualising our predictions
+```{r, eval=TRUE,echo=FALSE}
+library(reshape2)
+melt.assign <- melt(assignDF,id.vars=c("problem.id"),
+                    variable.name="model",value.name="prediction")
+g <- ggplot(melt.assign,aes(x=problem.id,y=prediction,
+                            color=factor(model),shape=factor(model)))
+g + geom_point(size=4) + scale_shape(solid=FALSE) +
+    labs(x="Problem ID") + labs(y="Prediction")
+```
+
+# Conclusions
+Proper tuning of three machine learning algorithms gives comparable performance on predictions. We use 25 percent of the original traing data as the cross-validation set to estimate the out-of-sample accuracy. The estimated accuracies are 0.98 (boosted tree), 0.98 (random forest) and 0.99 (support vector machine). These three models yield identical predictions on the 20 assignment test cases. Quiz results show that our predictions are 100 percent correct.
